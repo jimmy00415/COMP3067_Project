@@ -86,8 +86,10 @@ def check_transcript_lengths(
         logger.warning("No text column found in manifest.")
         return {"has_transcripts": False}
 
-    char_lengths = df["text"].str.len().values
-    word_counts = df["text"].str.split().str.len().values
+    # Ensure text column is string type (may contain NaN/numeric)
+    text_series = df["text"].fillna("").astype(str)
+    char_lengths = text_series.str.len().values
+    word_counts = text_series.str.split().str.len().values
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
