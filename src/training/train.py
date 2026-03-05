@@ -243,7 +243,7 @@ class Trainer:
         train_cfg = cfg.get("training", {})
         self.max_epochs = train_cfg.get("max_epochs", 100)
         self.batch_size = train_cfg.get("batch_size", 16)
-        self.lr = train_cfg.get("lr", 1e-4)
+        self.lr = train_cfg.get("optimizer", {}).get("lr", 1e-4)
         self.grad_accum_steps = train_cfg.get("grad_accum_steps", 1)
         self.fp16 = train_cfg.get("fp16", True) and torch.cuda.is_available()
         self.max_samples = train_cfg.get("max_samples", None)
@@ -251,12 +251,13 @@ class Trainer:
         self.eval_every = train_cfg.get("eval_every", 5)
 
         # Early stopping
-        es_cfg = cfg.get("early_stopping", {})
+        es_cfg = train_cfg.get("early_stopping", {})
         self.patience = es_cfg.get("patience", 10)
         self.min_delta = es_cfg.get("min_delta", 0.001)
 
         # Paths
-        self.checkpoint_dir = Path(cfg.get("checkpoint_dir", f"checkpoints/system_{self.system.lower()}"))
+        ckpt_dir = train_cfg.get("checkpoint", {}).get("save_dir", f"checkpoints/system_{self.system.lower()}")
+        self.checkpoint_dir = Path(ckpt_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
         # Model
@@ -276,24 +277,31 @@ class Trainer:
         system = self.system.upper()
 
         # Prosody heads for System C
+        prosody_cfg = model_cfg.get("prosody", {})
+        emotion_cfg = model_cfg.get("emotion", {})
         prosody_heads = None
         if system == "C":
-            ph_cfg = self.cfg.get("prosody_heads", {})
+            f0_cfg = prosody_cfg.get("f0_head", {})
+            energy_cfg = prosody_cfg.get("energy_head", {})
             prosody_heads = build_prosody_heads(
-                input_dim=model_cfg.get("embedding_dim", 192),
-                hidden_dim=ph_cfg.get("hidden_dim", 128),
-                f0_output_dim=ph_cfg.get("f0_output_dim", 4),
-                energy_output_dim=ph_cfg.get("energy_output_dim", 2),
+                input_dim=emotion_cfg.get("embedding_dim", 192),
+                hidden_dim=f0_cfg.get("hidden_dim", 128),
+                f0_output_dim=f0_cfg.get("output_dim", 4),
+                energy_output_dim=energy_cfg.get("output_dim", 2),
             )
+
+        # Read init_from from training config (where YAMLs define it)
+        train_cfg = self.cfg.get("training", {})
+        init_from = train_cfg.get("init_from", self.cfg.get("init_from"))
 
         self.model = build_emotion_vits(
             system=system,
-            checkpoint_path=self.cfg.get("init_from"),
+            checkpoint_path=init_from,
             use_cuda=(self.device.type == "cuda"),
-            num_emotions=model_cfg.get("num_emotions", 4),
-            embedding_dim=model_cfg.get("embedding_dim", 192),
+            num_emotions=emotion_cfg.get("num_emotions", 4),
+            embedding_dim=emotion_cfg.get("embedding_dim", 192),
             prosody_heads=prosody_heads,
-            prosody_loss_weight=self.cfg.get("prosody_heads", {}).get("loss_weight", 0.1),
+            prosody_loss_weight=prosody_cfg.get("loss_weight", 0.1),
         )
 
         self.model = self.model.to(self.device)
@@ -758,8 +766,8 @@ def train_with_coqui(cfg: dict) -> None:
         eval_batch_size=train_cfg.get("batch_size", 16),
         num_loader_workers=2,
         epochs=train_cfg.get("max_epochs", 100),
-        lr_gen=train_cfg.get("lr", 1e-4),
-        lr_disc=train_cfg.get("lr", 1e-4),
+        lr_gen=train_cfg.get("optimizer", {}).get("lr", 1e-4),
+        lr_disc=train_cfg.get("optimizer", {}).get("lr", 1e-4),
         mixed_precision=train_cfg.get("fp16", True),
     )
 
@@ -775,7 +783,7 @@ def train_with_coqui(cfg: dict) -> None:
     model = Vits.init_from_config(vits_config)
 
     # Load pretrained weights
-    init_from = cfg.get("init_from")
+    init_from = cfg.get("training", {}).get("init_from", cfg.get("init_from"))
     if init_from == "pretrained":
         logger.info("Initializing from pretrained LJSpeech VITS")
         # Download and load pretrained weights
@@ -792,7 +800,7 @@ def train_with_coqui(cfg: dict) -> None:
             model.load_state_dict(state["vits_state_dict"], strict=False)
 
     # Apply freeze strategy
-    freeze_cfg = cfg.get("freeze", {})
+    freeze_cfg = cfg.get("training", {}).get("freeze", {})
     modules_to_freeze = freeze_cfg.get("modules", [])
     modules_to_unfreeze = freeze_cfg.get("unfreeze", [])
 

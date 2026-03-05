@@ -140,7 +140,7 @@ def extract_f0(
         fmax=fmax,
         sr=sr,
         hop_length=hop_length,
-        win_length=win_length,
+        # win_length removed — deprecated in librosa >= 0.11.0
     )
     return f0, voiced_flag
 

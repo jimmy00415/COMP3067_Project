@@ -270,8 +270,11 @@ def run_prosody_evaluation(cfg: dict) -> dict:
     eval_cfg = cfg.get("evaluation", cfg)
     prosody_cfg = eval_cfg.get("prosody", {})
 
-    manifest_path = eval_cfg.get("manifest_path", "data/processed/eval_stimuli/eval_manifest.csv")
-    output_dir = eval_cfg.get("output_dir", "tables")
+    # Accept both 'manifest_path' and 'manifest' keys (eval.yaml uses 'manifest')
+    manifest_path = eval_cfg.get("manifest_path",
+                     eval_cfg.get("manifest", "data/processed/eval_stimuli/eval_manifest.csv"))
+    output_dir = eval_cfg.get("output_dir",
+                  eval_cfg.get("tables_dir", "tables"))
     sr = prosody_cfg.get("sample_rate", 22050)
     f0_fmin = prosody_cfg.get("f0_fmin", 75.0)
     f0_fmax = prosody_cfg.get("f0_fmax", 300.0)

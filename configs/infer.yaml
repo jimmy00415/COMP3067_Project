@@ -10,7 +10,7 @@ inference:
   emotion: neutral  # neutral, angry, amused, disgust
   
   # Output
-  output_dir: outputs/
+  output_dir: data/processed/eval_stimuli
   sample_rate: 22050
   
   # Batch generation settings

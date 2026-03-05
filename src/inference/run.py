@@ -285,7 +285,16 @@ def run_inference(cfg: dict) -> dict:
     import pandas as pd
 
     infer_cfg = cfg.get("inference", cfg)
-    systems = infer_cfg.get("systems", ["A0", "B"])
+
+    # Accept both "systems" (list) and "system" (string) from config
+    systems = infer_cfg.get("systems", None)
+    if systems is None:
+        s = infer_cfg.get("system", "A0")
+        systems = [s] if isinstance(s, str) else list(s)
+    # Always generate for all 4 systems for evaluation
+    if len(systems) == 1 and infer_cfg.get("batch", {}).get("enabled", False):
+        systems = ["A0", "A", "B", "C"]
+
     output_dir = infer_cfg.get("output_dir", "data/processed/eval_stimuli")
     canary_path = infer_cfg.get("canary_texts", "configs/canary_texts.txt")
     use_cuda = infer_cfg.get("use_cuda", torch.cuda.is_available())

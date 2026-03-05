@@ -3,10 +3,10 @@
 evaluation:
   # Frozen sample directory
   samples_dir: data/processed/eval_stimuli
-  manifest: data/manifests/eval_frozen_manifest.csv
+  manifest_path: data/processed/eval_stimuli/eval_manifest.csv
   
   # Output directories
-  tables_dir: tables
+  output_dir: tables
   figures_dir: figures
 
   # Prosody analysis (PRIMARY automatic metric)

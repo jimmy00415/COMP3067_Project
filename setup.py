@@ -8,10 +8,9 @@ setup(
     packages=find_packages(),
     python_requires=">=3.10,<3.13",
     install_requires=[
-        "TTS==0.22.0",
-        "torch>=2.0",
-        "torchaudio>=2.0",
-        "hydra-core>=1.3",
+        # TTS==0.22.0 requires separate install with --ignore-requires-python on 3.12+
+        "torch>=2.1",
+        "torchaudio>=2.1",
         "omegaconf>=2.3",
         "mlflow>=2.10",
         "librosa>=0.10",

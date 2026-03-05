@@ -207,8 +207,11 @@ def run_ser_evaluation(cfg: dict) -> dict:
     eval_cfg = cfg.get("evaluation", cfg)
     ser_cfg = eval_cfg.get("ser_probe", {})
 
-    manifest_path = eval_cfg.get("manifest_path", "data/processed/eval_stimuli/eval_manifest.csv")
-    output_dir = eval_cfg.get("output_dir", "tables")
+    # Accept both 'manifest_path' and 'manifest' keys (eval.yaml uses 'manifest')
+    manifest_path = eval_cfg.get("manifest_path",
+                     eval_cfg.get("manifest", "data/processed/eval_stimuli/eval_manifest.csv"))
+    output_dir = eval_cfg.get("output_dir",
+                  eval_cfg.get("tables_dir", "tables"))
     use_cuda = ser_cfg.get("use_cuda", False)
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
