@@ -1,0 +1,57 @@
+# System A: Domain-adapted baseline (NO emotion labels)
+# "This is the domain-adapted baseline to isolate conditioning effect"
+# Fine-tune pretrained VITS on EmoV-DB WITHOUT emotion conditioning.
+# All utterances treated as a single unlabeled class.
+
+system: A
+description: "Domain-adapted baseline — fine-tuned on EmoV-DB without emotion labels"
+
+model:
+  name: tts_models/en/ljspeech/vits
+  type: vits
+  # No emotion embedding for System A
+  use_emotion: false
+  use_prosody_heads: false
+
+training:
+  # Initialize from pretrained Coqui checkpoint
+  init_from: pretrained  # "pretrained" or path to checkpoint
+  
+  # Freeze strategy: preserve quality, adapt to speaker/domain
+  freeze:
+    text_encoder: true
+    posterior_encoder: true
+    decoder: true
+    # Unfreeze these for domain adaptation
+    duration_predictor: false
+    flow: false
+
+  optimizer:
+    type: AdamW
+    lr: 5.0e-5
+    betas: [0.8, 0.99]
+    weight_decay: 0.01
+  
+  scheduler:
+    type: ExponentialLR
+    gamma: 0.999
+
+  max_epochs: 100
+  batch_size: 16
+  gradient_clip_val: 1.0
+  early_stopping:
+    monitor: val/loss_total
+    patience: 10
+    mode: min
+  
+  # Checkpointing (save to Drive on Colab)
+  checkpoint:
+    save_top_k: 3
+    monitor: val/loss_total
+    save_dir: checkpoints/system_a
+
+  fp16: true
+  seed: 42
+
+data:
+  config: configs/data.yaml

@@ -1,0 +1,61 @@
+# System B: Emotion embedding conditioning
+# Initialize from System A checkpoint (warm-start chain)
+# Adds learnable nn.Embedding(4, hidden_dim) to text encoder output
+
+system: B
+description: "Emotion-conditioned — System A + emotion embedding"
+
+model:
+  name: tts_models/en/ljspeech/vits
+  type: emotion_vits
+  use_emotion: true
+  use_prosody_heads: false
+  
+  emotion:
+    num_emotions: 4
+    embedding_dim: 192  # Match VITS hidden_dim
+    injection: add  # "add" or "concat"
+    injection_point: text_encoder_output  # Before posterior encoder / flow
+
+training:
+  # Initialize from System A checkpoint (NOT raw pretrained)
+  init_from: checkpoints/system_a/best.pth
+  
+  freeze:
+    text_encoder: true
+    posterior_encoder: true
+    decoder: true
+    # Unfreeze for emotion adaptation
+    duration_predictor: false
+    flow: false
+    # Emotion embedding is always unfrozen (new parameters)
+    emotion_embedding: false
+
+  optimizer:
+    type: AdamW
+    lr: 1.0e-4
+    betas: [0.8, 0.99]
+    weight_decay: 0.01
+  
+  scheduler:
+    type: ExponentialLR
+    gamma: 0.999
+
+  max_epochs: 100
+  batch_size: 16
+  gradient_clip_val: 1.0
+  early_stopping:
+    monitor: val/loss_total
+    patience: 10
+    mode: min
+  
+  checkpoint:
+    save_top_k: 3
+    monitor: val/loss_total
+    save_dir: checkpoints/system_b
+
+  fp16: true
+  seed: 42
+
+data:
+  config: configs/data.yaml

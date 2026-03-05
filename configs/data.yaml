@@ -1,0 +1,47 @@
+# Data configuration
+dataset:
+  name: emov_db
+  raw_dir: data/raw/EmoV-DB
+  processed_dir: data/processed/train
+  eval_stimuli_dir: data/processed/eval_stimuli
+  manifests_dir: data/manifests
+
+  # Single-speaker policy (ADR-7)
+  # Set after S1.1 speaker audit — core speaker with all 4 emotions
+  core_speaker: null  # e.g., "bea" or "sam" — set after audit
+
+  emotions:
+    - neutral
+    - angry
+    - amused
+    - disgust
+  emotion_map:
+    neutral: 0
+    angry: 1
+    amused: 2
+    disgust: 3
+  num_emotions: 4
+
+audio:
+  sample_rate: 22050
+  # Conservative peak normalization (ADR-7)
+  # Energy is part of the emotional signal — do NOT use aggressive LUFS
+  normalization: peak
+  peak_db: -1.0  # dBFS
+  # Eval playback copies get separate LUFS normalization
+  eval_lufs: -23.0  # EBU R128
+
+  # F0 extraction (pYIN via librosa)
+  # Speaker-aware ranges — set after S1.1 audit
+  f0_fmin: 75    # Hz (male default; female: 100)
+  f0_fmax: 300   # Hz (male default; female: 500)
+  hop_length: 256
+  win_length: 1024
+
+splits:
+  train_ratio: 0.80
+  val_ratio: 0.10
+  test_ratio: 0.10
+  seed: 42
+  stratify_by: emotion
+  # eval_holdout: separate set of texts for human eval (not in train/val/test)

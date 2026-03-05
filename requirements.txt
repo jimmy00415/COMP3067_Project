@@ -1,0 +1,33 @@
+# Core TTS — resolve via dependency spike (S0.0)
+# Use ONE of the following (test on Colab first):
+TTS==0.22.0
+# coqui-tts>=0.25.0
+
+# PyTorch (installed separately — see docs/dependency_spike.md)
+# pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# Infrastructure
+hydra-core==1.3.2
+omegaconf==2.3.0
+mlflow==2.12.1
+dvc==3.50.0
+
+# Audio processing
+librosa==0.10.2
+soundfile==0.12.1
+numpy>=1.24,<2.0
+scipy>=1.11
+
+# Evaluation
+speechbrain==1.0.0
+pandas==2.2.2
+matplotlib==3.9.0
+seaborn==0.13.2
+
+# Demo
+gradio==4.44.0
+
+# Dev tools
+pytest==8.2.0
+ruff==0.4.4
+pre-commit==3.7.1

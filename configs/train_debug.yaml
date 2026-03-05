@@ -1,0 +1,55 @@
+# Debug training config — small run for code validation
+# Use before GPU training to catch bugs fast
+
+system: debug
+description: "Debug config — 50 samples, 5 epochs, CPU-safe"
+
+model:
+  name: tts_models/en/ljspeech/vits
+  type: emotion_vits
+  use_emotion: true
+  use_prosody_heads: false
+  
+  emotion:
+    num_emotions: 4
+    embedding_dim: 192
+    injection: add
+    injection_point: text_encoder_output
+
+training:
+  init_from: pretrained
+  
+  freeze:
+    text_encoder: true
+    posterior_encoder: true
+    decoder: true
+    duration_predictor: false
+    flow: false
+    emotion_embedding: false
+
+  optimizer:
+    type: AdamW
+    lr: 1.0e-4
+    betas: [0.8, 0.99]
+    weight_decay: 0.01
+  
+  scheduler:
+    type: ExponentialLR
+    gamma: 0.999
+
+  # Debug: very small run
+  max_epochs: 5
+  batch_size: 4
+  max_samples: 50  # Limit dataset size
+  gradient_clip_val: 1.0
+  
+  checkpoint:
+    save_top_k: 1
+    monitor: val/loss_total
+    save_dir: checkpoints/debug
+
+  fp16: false  # CPU doesn't support fp16
+  seed: 42
+
+data:
+  config: configs/data.yaml

@@ -1,0 +1,27 @@
+# Inference configuration
+
+inference:
+  # Which system to run
+  system: C  # A0, A, B, or C
+  checkpoint: checkpoints/system_c/best.pth
+  
+  # Input
+  text: "Hello, how are you today?"
+  emotion: neutral  # neutral, angry, amused, disgust
+  
+  # Output
+  output_dir: outputs/
+  sample_rate: 22050
+  
+  # Batch generation settings
+  batch:
+    enabled: false
+    texts_file: configs/canary_texts.txt
+    emotions:
+      - neutral
+      - angry
+      - amused
+      - disgust
+    output_dir: outputs/batch/
+
+  device: auto  # auto, cuda, cpu

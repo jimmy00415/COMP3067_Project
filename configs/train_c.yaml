@@ -1,0 +1,74 @@
+# System C: Prosody-aware auxiliary supervision (utterance-level)
+# Initialize from System B checkpoint (warm-start chain: A → B → C)
+# Adds F0 stats head + Energy stats head as auxiliary losses
+
+system: C
+description: "Prosody-aware — System B + utterance-level F0/energy aux loss"
+
+model:
+  name: tts_models/en/ljspeech/vits
+  type: emotion_vits
+  use_emotion: true
+  use_prosody_heads: true  # <-- This is what makes it System C
+  
+  emotion:
+    num_emotions: 4
+    embedding_dim: 192
+    injection: add
+    injection_point: text_encoder_output
+
+  prosody:
+    # Utterance-level (C1, default path)
+    level: utterance  # "utterance" (C1) or "frame" (C2, stretch only)
+    f0_head:
+      input_dim: 192
+      hidden_dim: 128
+      output_dim: 4  # [mean_f0, f0_std, f0_range_low, f0_range_high]
+    energy_head:
+      input_dim: 192
+      hidden_dim: 128
+      output_dim: 2  # [mean_energy, energy_std]
+    loss_weight: 0.1  # λ_prosody relative to main VITS loss
+
+training:
+  # Initialize from System B checkpoint
+  init_from: checkpoints/system_b/best.pth
+  
+  freeze:
+    text_encoder: true
+    posterior_encoder: true
+    decoder: true
+    duration_predictor: false
+    flow: false
+    emotion_embedding: false
+    # Prosody heads are always unfrozen (new parameters)
+    prosody_heads: false
+
+  optimizer:
+    type: AdamW
+    lr: 1.0e-4
+    betas: [0.8, 0.99]
+    weight_decay: 0.01
+  
+  scheduler:
+    type: ExponentialLR
+    gamma: 0.999
+
+  max_epochs: 100
+  batch_size: 16
+  gradient_clip_val: 1.0
+  early_stopping:
+    monitor: val/loss_total
+    patience: 10
+    mode: min
+  
+  checkpoint:
+    save_top_k: 3
+    monitor: val/loss_total
+    save_dir: checkpoints/system_c
+
+  fp16: true
+  seed: 42
+
+data:
+  config: configs/data.yaml

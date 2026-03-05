@@ -1,0 +1,52 @@
+# Evaluation configuration
+
+evaluation:
+  # Frozen sample directory
+  samples_dir: data/processed/eval_stimuli
+  manifest: data/manifests/eval_frozen_manifest.csv
+  
+  # Output directories
+  tables_dir: tables
+  figures_dir: figures
+
+  # Prosody analysis (PRIMARY automatic metric)
+  prosody:
+    enabled: true
+    f0_fmin: 75    # Speaker-aware — set after audit
+    f0_fmax: 300
+    hop_length: 256
+    metrics:
+      - f0_mean
+      - f0_std
+      - f0_range
+      - energy_mean
+      - energy_std
+      - speaking_rate
+
+  # SER probe (AUXILIARY ONLY — weak proxy)
+  # WARNING: Label mismatch — see ADR-5
+  # IEMOCAP labels: neu/ang/hap/sad
+  # Our labels: neutral/angry/amused/disgust
+  # disgust → UNMAPPED; amused ≈ hap (loose)
+  ser_probe:
+    enabled: true
+    model: speechbrain/emotion-recognition-wav2vec2-IEMOCAP
+    # Report as "ser_proxy_agreement" NOT "accuracy"
+    output_column: ser_proxy_agreement
+    label_mapping:
+      neutral: neu
+      angry: ang
+      amused: hap  # loose approximation
+      disgust: null  # UNMAPPED — no IEMOCAP equivalent
+
+  # Optional: ASR intelligibility check
+  asr_check:
+    enabled: false
+    model: openai/whisper-small
+
+  # Plot settings
+  plots:
+    style: seaborn-v0_8-whitegrid
+    dpi: 300
+    figsize: [10, 6]
+    format: png

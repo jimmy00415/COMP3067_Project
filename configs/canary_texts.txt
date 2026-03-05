@@ -1,0 +1,24 @@
+# Canary Text Set — 16 sentences for consistent evaluation across all systems
+# Covers: short/long, declarative/interrogative/exclamatory/imperative,
+#         emotionally compatible/neutral/conflicting, varied phoneme coverage
+#
+# SHORT (≤6 words)
+1|Please leave me alone now.
+2|That was absolutely wonderful!
+3|What do you think happened?
+4|Stop doing that immediately.
+# LONG (≥15 words)
+5|I can't believe you would actually go ahead and do something like that without telling me first.
+6|The quarterly financial report has been submitted to the board of directors for their final review.
+7|Would you kindly explain to me why this particular situation has become so incredibly complicated?
+8|Take all of the necessary precautions before you proceed with the experiment in the laboratory.
+# EMOTIONALLY COMPATIBLE
+9|This is the most disgusting thing I have ever seen in my entire life.
+10|I am so happy and thrilled to finally meet you after all these years of waiting.
+11|Get out of my house right now before I completely lose my temper with you.
+12|Ha, that joke was so funny I nearly fell off my chair laughing at it.
+# EMOTIONALLY NEUTRAL / CONFLICTING
+13|The temperature today is expected to reach twenty three degrees with partly cloudy skies.
+14|Please remember to pick up the dry cleaning on your way home from work this evening.
+15|The research methodology section requires additional citations from peer reviewed journals.
+16|Scientists have discovered a new species of butterfly in the Amazon rainforest last summer.
