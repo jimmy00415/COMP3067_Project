@@ -1,6 +1,6 @@
 # Emotive TTS — Emotion-Conditioned Neural Text-to-Speech
 
-**COMP3065 Final Year Project**
+**COMP3065 Project**
 
 Exploring emotion expressiveness in neural TTS via VITS fine-tuning with emotion conditioning and prosody auxiliary supervision.
 
