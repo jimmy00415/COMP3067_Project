@@ -428,6 +428,7 @@ def prepare_dataset(cfg: dict) -> dict:
         summary["mean_duration_sec"] = float(df["duration"].mean())
 
     # Save summary
+    Path("tables").mkdir(parents=True, exist_ok=True)
     summary_df = pd.DataFrame([summary])
     summary_df.to_csv("tables/dataset_stats.csv", index=False)
 
