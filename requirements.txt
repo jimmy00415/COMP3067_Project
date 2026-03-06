@@ -1,7 +1,9 @@
 # Core TTS — resolve via dependency spike (S0.0)
-# Use ONE of the following (test on Colab first):
-TTS==0.22.0
-# coqui-tts>=0.25.0
+# TTS==0.22.0 is from the archived Coqui repo and cannot build on Python 3.12+.
+# coqui-tts is the community fork with native Python 3.12 support.
+# It provides the same "TTS" package namespace — all imports work unchanged.
+coqui-tts>=0.25.0
+# TTS==0.22.0  # legacy, Python <=3.11 only
 
 # PyTorch (installed separately — see docs/dependency_spike.md)
 # pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
