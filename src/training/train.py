@@ -158,9 +158,16 @@ class EmotiveTTSDataset(Dataset):
         if path_col in self.df.columns:
             exists_mask = self.df[path_col].apply(lambda p: os.path.isfile(str(p)))
             n_missing = (~exists_mask).sum()
-            if n_missing > 0:
+            if n_missing > 0 and n_missing < len(self.df):
                 logger.warning(f"Dropping {n_missing}/{len(self.df)} rows with missing audio files")
                 self.df = self.df[exists_mask].reset_index(drop=True)
+            elif n_missing == len(self.df):
+                sample = self.df[path_col].iloc[0]
+                raise FileNotFoundError(
+                    f"ALL {n_missing} audio files are missing (e.g. {sample}). "
+                    f"The manifest exists but processed audio does not. "
+                    f"Re-run the data preparation step (Section 1b) to regenerate audio files."
+                )
 
         self.sr = sr
         self.max_audio_len = max_audio_len
