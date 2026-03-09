@@ -16,8 +16,10 @@ Or from Colab:
     train(cfg)
 """
 
+import gc
 import os
 import logging
+import shutil
 import time
 from pathlib import Path
 from typing import Optional
@@ -39,6 +41,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Audio helpers for training loop
 # ---------------------------------------------------------------------------
+
+# Cache mel filterbanks to avoid recomputing on every call
+_MEL_BASIS_CACHE: dict[tuple, torch.Tensor] = {}
+
 
 def _compute_mel_spectrogram(
     audio: torch.Tensor,
@@ -66,16 +72,39 @@ def _compute_mel_spectrogram(
     )
     magnitudes = stft.abs()  # (batch, n_fft//2+1, frames)
 
-    # Mel filterbank
-    import librosa
-    mel_basis = librosa.filters.mel(
-        sr=sample_rate, n_fft=n_fft, n_mels=n_mels, fmin=fmin, fmax=fmax,
-    )
-    mel_basis = torch.from_numpy(mel_basis).float().to(audio.device)
+    # Mel filterbank — cached per (device, sr, n_fft, n_mels, fmin, fmax)
+    cache_key = (str(audio.device), sample_rate, n_fft, n_mels, fmin, fmax)
+    if cache_key not in _MEL_BASIS_CACHE:
+        import librosa
+        mel_np = librosa.filters.mel(
+            sr=sample_rate, n_fft=n_fft, n_mels=n_mels, fmin=fmin, fmax=fmax,
+        )
+        _MEL_BASIS_CACHE[cache_key] = torch.from_numpy(mel_np).float().to(audio.device)
+    mel_basis = _MEL_BASIS_CACHE[cache_key]
 
     mel = torch.matmul(mel_basis, magnitudes)  # (batch, n_mels, frames)
     log_mel = torch.log(torch.clamp(mel, min=1e-5))
     return log_mel
+
+
+def _compute_linear_spectrogram(
+    audio: torch.Tensor,
+    n_fft: int = 1024,
+    hop_length: int = 256,
+    win_length: int = 1024,
+) -> torch.Tensor:
+    """Compute linear spectrogram (magnitude) from waveform.
+
+    Returns shape ``(batch, n_fft//2+1, frames)`` — 513 bins for n_fft=1024.
+    This is what the VITS posterior encoder expects as input.
+    """
+    window = torch.hann_window(win_length, device=audio.device)
+    stft = torch.stft(
+        audio, n_fft=n_fft, hop_length=hop_length, win_length=win_length,
+        window=window, return_complex=True,
+    )
+    magnitudes = stft.abs()  # (batch, n_fft//2+1, frames)
+    return magnitudes
 
 
 def _kl_loss(
@@ -123,6 +152,16 @@ class EmotiveTTSDataset(Dataset):
         self.df = pd.read_csv(manifest_path)
         if max_samples and max_samples > 0:
             self.df = self.df.head(max_samples)
+
+        # Filter out rows whose audio files don't exist on disk
+        path_col = "processed_path" if "processed_path" in self.df.columns else "file_path"
+        if path_col in self.df.columns:
+            exists_mask = self.df[path_col].apply(lambda p: os.path.isfile(str(p)))
+            n_missing = (~exists_mask).sum()
+            if n_missing > 0:
+                logger.warning(f"Dropping {n_missing}/{len(self.df)} rows with missing audio files")
+                self.df = self.df[exists_mask].reset_index(drop=True)
+
         self.sr = sr
         self.max_audio_len = max_audio_len
 
@@ -348,12 +387,15 @@ class Trainer:
             sr=data_cfg.get("sample_rate", 22050),
         )
 
+        # num_workers=0 for Colab stability (multiprocessing can deadlock)
+        num_workers = self.cfg.get("training", {}).get("num_workers", 0)
+
         train_loader = DataLoader(
             train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
             collate_fn=collate_fn,
-            num_workers=2,
+            num_workers=num_workers,
             pin_memory=(self.device.type == "cuda"),
             drop_last=True,
         )
@@ -363,7 +405,7 @@ class Trainer:
             batch_size=self.batch_size,
             shuffle=False,
             collate_fn=collate_fn,
-            num_workers=2,
+            num_workers=num_workers,
             pin_memory=(self.device.type == "cuda"),
         )
 
@@ -423,17 +465,19 @@ class Trainer:
             x[i, :len(t)] = t.to(self.device)
             x_lengths[i] = len(t)
 
-        # --- Compute mel spectrogram from audio ---
-        mel = _compute_mel_spectrogram(audio).to(self.device)
-        mel_lengths = (audio_lengths / 256).long().clamp(min=1)  # hop_length=256
+        # --- Compute spectrograms from audio ---
+        # The VITS posterior encoder expects a LINEAR spectrogram (513 bins),
+        # NOT a mel spectrogram (80 bins).
+        linear_spec = _compute_linear_spectrogram(audio).to(self.device)
+        spec_lengths = (audio_lengths / 256).long().clamp(min=1)  # hop_length=256
 
         with torch.amp.autocast("cuda", enabled=self.fp16):
             # Full EmotionVITS forward pass
             outputs = self.model(
                 x=x,
                 x_lengths=x_lengths,
-                y=mel,
-                y_lengths=mel_lengths,
+                y=linear_spec,
+                y_lengths=spec_lengths,
                 emotion_ids=emotion_ids,
                 prosody_targets=prosody_targets,
             )
@@ -460,9 +504,9 @@ class Trainer:
                 m_p = outputs["m_p"]
                 logs_p = outputs["logs_p"]
                 logs_q = outputs["logs_q"]
-                # Create mask from mel_lengths
-                max_mel_len = z_p.shape[-1]
-                z_mask = torch.arange(max_mel_len, device=self.device).unsqueeze(0) < mel_lengths.unsqueeze(1)
+                # Create mask from spec_lengths
+                max_spec_len = z_p.shape[-1]
+                z_mask = torch.arange(max_spec_len, device=self.device).unsqueeze(0) < spec_lengths.unsqueeze(1)
                 z_mask = z_mask.unsqueeze(1).float()  # (batch, 1, time)
                 kl_loss = _kl_loss(z_p, logs_q, m_p, logs_p, z_mask)
 
@@ -544,13 +588,13 @@ class Trainer:
                 x[i, :len(t)] = t.to(self.device)
                 x_lengths[i] = len(t)
 
-            mel = _compute_mel_spectrogram(audio).to(self.device)
-            mel_lengths = (audio_lengths / 256).long().clamp(min=1)
+            linear_spec = _compute_linear_spectrogram(audio).to(self.device)
+            spec_lengths = (audio_lengths / 256).long().clamp(min=1)
 
             with torch.amp.autocast("cuda", enabled=self.fp16):
                 outputs = self.model(
                     x=x, x_lengths=x_lengths,
-                    y=mel, y_lengths=mel_lengths,
+                    y=linear_spec, y_lengths=spec_lengths,
                     emotion_ids=emotion_ids,
                     prosody_targets=prosody_targets,
                 )
@@ -570,8 +614,8 @@ class Trainer:
                 kl_loss = torch.tensor(0.0, device=self.device)
                 if all(k in outputs for k in ("z_p", "m_p", "logs_p", "m_q", "logs_q")):
                     z_p = outputs["z_p"]
-                    max_mel_len = z_p.shape[-1]
-                    z_mask = (torch.arange(max_mel_len, device=self.device).unsqueeze(0) < mel_lengths.unsqueeze(1))
+                    max_spec_len = z_p.shape[-1]
+                    z_mask = (torch.arange(max_spec_len, device=self.device).unsqueeze(0) < spec_lengths.unsqueeze(1))
                     z_mask = z_mask.unsqueeze(1).float()
                     kl_loss = _kl_loss(z_p, outputs["logs_q"], outputs["m_p"], outputs["logs_p"], z_mask)
 
@@ -597,7 +641,7 @@ class Trainer:
         return metrics
 
     def save_checkpoint(self, epoch: int, is_best: bool = False):
-        """Save model checkpoint."""
+        """Save model checkpoint (locally and optionally to Drive)."""
         state = {
             "epoch": epoch,
             "global_step": self.global_step,
@@ -627,6 +671,24 @@ class Trainer:
             best_path = self.checkpoint_dir / "best.pth"
             torch.save(state, best_path)
             logger.info(f"Saved best checkpoint: {best_path}")
+
+        # Persist best checkpoint to Drive (Colab crash resilience)
+        if is_best:
+            self._backup_to_drive(best_path)
+
+    def _backup_to_drive(self, local_path: Path):
+        """Copy checkpoint to Google Drive if drive_checkpoint_dir is set."""
+        drive_dir = self.cfg.get("training", {}).get("drive_checkpoint_dir")
+        if not drive_dir:
+            return
+        drive_dir = Path(drive_dir)
+        try:
+            drive_dir.mkdir(parents=True, exist_ok=True)
+            dst = drive_dir / local_path.name
+            shutil.copy2(str(local_path), str(dst))
+            logger.info(f"Backed up to Drive: {dst}")
+        except Exception as e:
+            logger.warning(f"Drive backup failed (non-critical): {e}")
 
     def train(self):
         """Full training loop."""
@@ -726,6 +788,11 @@ class Trainer:
 
             # LR decay
             self.scheduler.step()
+
+            # Periodic GPU housekeeping (prevents fragmentation on Colab T4)
+            if self.device.type == "cuda" and epoch % 5 == 0:
+                gc.collect()
+                torch.cuda.empty_cache()
 
         # Save final checkpoint
         self.save_checkpoint(epoch, is_best=False)
