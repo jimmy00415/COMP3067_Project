@@ -508,8 +508,10 @@ class Trainer:
             m_q = outputs["m_q"]
             logs_q = outputs["logs_q"]
 
-            # Build mask for KL loss
-            y_mask = torch.ones(z_p.shape[0], 1, z_p.shape[2], device=z_p.device)
+            # Build proper sequence mask (exclude padding from KL loss)
+            max_spec_len = z_p.shape[2]
+            ids = torch.arange(max_spec_len, device=z_p.device).unsqueeze(0)  # (1, T)
+            y_mask = (ids < spec_lengths.unsqueeze(1)).unsqueeze(1).float()   # (B, 1, T)
             kl_loss = _kl_loss(z_p, logs_q, m_p, logs_p, y_mask)
 
             # --- Duration predictor loss ---
@@ -607,7 +609,9 @@ class Trainer:
             mel_loss = F.l1_loss(mel_hat, mel_target)
 
             z_p = outputs["z_p"]
-            y_mask = torch.ones(z_p.shape[0], 1, z_p.shape[2], device=z_p.device)
+            max_spec_len = z_p.shape[2]
+            ids = torch.arange(max_spec_len, device=z_p.device).unsqueeze(0)
+            y_mask = (ids < spec_lengths.unsqueeze(1)).unsqueeze(1).float()
             kl_loss = _kl_loss(z_p, outputs["logs_q"], outputs["m_p"], outputs["logs_p"], y_mask)
 
             duration_loss = outputs.get("duration_loss", torch.tensor(0.0, device=self.device))
