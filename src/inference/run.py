@@ -29,7 +29,7 @@ from src.data.utils import (
     lufs_normalize,
     file_hash,
 )
-from src.models.baseline import BaselineSynthesizer, create_system_a0, create_system_a
+from src.models.baseline import BaselineSynthesizer, create_system_a0
 from src.models.emotion_vits import EmotionVITS, build_emotion_vits
 from src.models.prosody_heads import build_prosody_heads
 
@@ -102,21 +102,26 @@ def synthesize_system_a0(
 def synthesize_system_a(
     texts: list[dict],
     checkpoint_path: str,
-    config_path: str,
     output_dir: str | Path,
     use_cuda: bool = False,
+    noise_scale: float = 0.667,
+    length_scale: float = 1.0,
 ) -> list[dict]:
     """Generate audio with System A (fine-tuned, no emotion labels).
 
     Like A0, System A has no emotion conditioning. The only difference
     is domain adaptation on EmoV-DB data.
 
+    Uses the same EmotionVITS wrapper (with use_emotion=False) that was
+    used during training, so checkpoints are format-compatible.
+
     Args:
         texts: Canary text list.
         checkpoint_path: Path to System A checkpoint.
-        config_path: Path to model config.
         output_dir: Output directory.
         use_cuda: GPU flag.
+        noise_scale: VITS noise scale for sampling.
+        length_scale: VITS duration scale.
 
     Returns:
         Generation metadata list.
@@ -124,38 +129,74 @@ def synthesize_system_a(
     output_dir = Path(output_dir) / "system_a"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    synth = create_system_a(checkpoint_path, config_path, use_cuda=use_cuda)
-    synth.load()
+    # Build model using the same EmotionVITS wrapper (system='A' → no emotion)
+    model = build_emotion_vits(
+        system="A",
+        checkpoint_path=checkpoint_path,
+        use_cuda=use_cuda,
+    )
+    model.eval()
+    device = torch.device("cuda" if use_cuda and torch.cuda.is_available() else "cpu")
 
     results = []
     for text_info in texts:
         text_id = text_info["id"]
         text = text_info["text"]
 
-        wav, sr = synth.synthesize(text)
-        wav = np.array(wav)
+        try:
+            # Tokenize text using the VITS tokenizer
+            if hasattr(model.vits, 'tokenizer'):
+                tokens = model.vits.tokenizer.text_to_ids(text)
+            else:
+                tokens = [ord(c) for c in text.lower()]
 
-        for emotion in EMOTION_LABELS:
-            fname = f"a_text{text_id:02d}_{emotion}.wav"
-            fpath = output_dir / fname
+            x = torch.LongTensor([tokens]).to(device)
 
-            wav_norm = peak_normalize(wav, target_db=-1.0)
-            sf.write(str(fpath), wav_norm, sr)
+            with torch.no_grad():
+                wav_tensor = model.infer(
+                    x=x,
+                    emotion_ids=None,  # System A has no emotion conditioning
+                    noise_scale=noise_scale,
+                    length_scale=length_scale,
+                )
 
-            lufs_dir = output_dir / "lufs"
-            lufs_dir.mkdir(exist_ok=True)
-            wav_lufs = lufs_normalize(wav, sr, target_lufs=-23.0)
-            sf.write(str(lufs_dir / fname), wav_lufs, sr)
+            wav = wav_tensor.squeeze().cpu().numpy()
+            sr = 22050
 
-            results.append({
-                "system": "A",
-                "text_id": text_id,
-                "text": text,
-                "emotion": emotion,
-                "file_path": str(fpath),
-                "lufs_path": str(lufs_dir / fname),
-                "sha256": file_hash(fpath),
-            })
+            # System A generates the same audio regardless of emotion label
+            # but we save copies for each emotion to enable fair comparison
+            for emotion in EMOTION_LABELS:
+                fname = f"a_text{text_id:02d}_{emotion}.wav"
+                fpath = output_dir / fname
+
+                wav_norm = peak_normalize(wav, target_db=-1.0)
+                sf.write(str(fpath), wav_norm, sr)
+
+                lufs_dir = output_dir / "lufs"
+                lufs_dir.mkdir(exist_ok=True)
+                wav_lufs = lufs_normalize(wav, sr, target_lufs=-23.0)
+                sf.write(str(lufs_dir / fname), wav_lufs, sr)
+
+                results.append({
+                    "system": "A",
+                    "text_id": text_id,
+                    "text": text,
+                    "emotion": emotion,
+                    "file_path": str(fpath),
+                    "lufs_path": str(lufs_dir / fname),
+                    "sha256": file_hash(fpath),
+                })
+
+        except Exception as e:
+            logger.error(f"Failed to synthesize text {text_id} for System A: {e}")
+            for emotion in EMOTION_LABELS:
+                results.append({
+                    "system": "A",
+                    "text_id": text_id,
+                    "text": text,
+                    "emotion": emotion,
+                    "error": str(e),
+                })
 
     logger.info(f"System A: Generated {len(results)} audio files")
     return results
@@ -314,8 +355,11 @@ def run_inference(cfg: dict) -> dict:
 
         elif system == "A":
             ckpt = infer_cfg.get("system_a_checkpoint", "checkpoints/system_a/best.pth")
-            config = infer_cfg.get("system_a_config", "checkpoints/system_a/config.json")
-            results = synthesize_system_a(texts, ckpt, config, output_dir, use_cuda=use_cuda)
+            results = synthesize_system_a(
+                texts, ckpt, output_dir, use_cuda=use_cuda,
+                noise_scale=infer_cfg.get("noise_scale", 0.667),
+                length_scale=infer_cfg.get("length_scale", 1.0),
+            )
 
         elif system in ("B", "C"):
             ckpt_key = f"system_{system.lower()}_checkpoint"
