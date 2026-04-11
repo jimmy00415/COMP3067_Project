@@ -231,12 +231,13 @@ class EmotionVITS(nn.Module):
         if dp is not None:
             w = attn.sum(-1).unsqueeze(1)  # (B, 1, T_text) per-phone frames
             try:
-                # Coqui StochasticDurationPredictor forward: (x, x_mask, w, g) -> NLL
-                dur_nll = dp(x_encoded, x_mask, w=w, g=None)
+                # Coqui StochasticDurationPredictor.forward(x, x_mask, dr, g, ...)
+                # dr = ground-truth durations, reverse=False (training mode)
+                dur_nll = dp(x_encoded, x_mask, dr=w, g=None, reverse=False)
                 duration_loss = dur_nll / x_mask.sum()
-            except (TypeError, RuntimeError):
+            except (TypeError, RuntimeError, AssertionError):
                 try:
-                    logw_hat = dp(x_encoded, x_mask, g=None)
+                    logw_hat = dp(x_encoded, x_mask, g=None, reverse=True)
                     log_w_gt = torch.log(w.clamp(min=1e-6))
                     duration_loss = F.l1_loss(logw_hat * x_mask, log_w_gt * x_mask)
                 except (TypeError, RuntimeError):
