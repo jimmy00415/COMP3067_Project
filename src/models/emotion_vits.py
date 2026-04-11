@@ -230,19 +230,17 @@ class EmotionVITS(nn.Module):
         duration_loss = torch.tensor(0.0, device=x.device)
         if dp is not None:
             w = attn.sum(-1).unsqueeze(1)  # (B, 1, T_text) per-phone frames
+            # Use L1 log-duration loss directly — the SDP's internal
+            # normalizing-flow spline is numerically fragile under fp16
+            # and with batched padding, causing empty-tensor / negative-
+            # discriminant crashes.  L1 on log-durations is standard in
+            # non-stochastic VITS and gives equivalent DP training signal.
             try:
-                # Coqui StochasticDurationPredictor.forward(x, x_mask, dr, g, ...)
-                # dr = ground-truth durations, reverse=False (training mode)
-                dur_nll = dp(x_encoded, x_mask, dr=w, g=None, reverse=False)
-                # SDP returns per-sample NLL (B,); reduce to scalar
-                duration_loss = dur_nll.sum() / x_mask.sum()
-            except (TypeError, RuntimeError, AssertionError):
-                try:
-                    logw_hat = dp(x_encoded, x_mask, g=None, reverse=True)
-                    log_w_gt = torch.log(w.clamp(min=1e-6))
-                    duration_loss = F.l1_loss(logw_hat * x_mask, log_w_gt * x_mask)
-                except (TypeError, RuntimeError):
-                    pass  # DP interface incompatible, skip duration loss
+                logw_hat = dp(x_encoded, x_mask, g=None, reverse=True)
+                log_w_gt = torch.log(w.clamp(min=1e-6))
+                duration_loss = F.l1_loss(logw_hat * x_mask, log_w_gt * x_mask)
+            except (TypeError, RuntimeError):
+                pass  # DP interface incompatible (mock or non-SDP), skip
 
         # Expand prior params from text-length to spec-length
         # (B, H, T_text) @ (B, T_text, T_spec) -> (B, H, T_spec)
