@@ -72,7 +72,7 @@ def _compute_mel_spectrogram(
     )
     magnitudes = stft.abs()  # (batch, n_fft//2+1, frames)
 
-    # Mel filterbank �?cached per (device, sr, n_fft, n_mels, fmin, fmax)
+    # Mel filterbank — cached per (device, sr, n_fft, n_mels, fmin, fmax)
     cache_key = (str(audio.device), sample_rate, n_fft, n_mels, fmin, fmax)
     if cache_key not in _MEL_BASIS_CACHE:
         import librosa
@@ -652,6 +652,8 @@ class Trainer:
         logger.info(f"Starting training: System {self.system}, {self.max_epochs} epochs, "
                      f"batch_size={self.batch_size}, lr={self.lr}")
 
+        history = []  # Per-epoch loss records for plotting
+
         for epoch in range(1, self.max_epochs + 1):
             self.model.train()
             epoch_losses = {}
@@ -696,6 +698,13 @@ class Trainer:
             mlflow_cb.log_metrics(log_metrics, step=epoch)
 
             val_loss = avg_val.get("loss_total", avg_train.get("loss_total", 0))
+
+            # Record history for post-training plots
+            record = {"epoch": epoch, "lr": self.optimizer.param_groups[0]["lr"]}
+            record.update({f"train_{k}": v for k, v in avg_train.items()})
+            record.update({f"val_{k}": v for k, v in avg_val.items()})
+            history.append(record)
+
             logger.info(
                 f"Epoch {epoch}/{self.max_epochs} -- "
                 f"train_loss={avg_train.get('loss_total', 0):.4f}, "
@@ -731,6 +740,7 @@ class Trainer:
         )
         mlflow_cb.end()
         logger.info("Training complete")
+        return history
 
 
 def train(cfg: dict):
@@ -747,7 +757,8 @@ def train(cfg: dict):
     trainer = Trainer(cfg)
     trainer.build_model()
     train_loader, val_loader = trainer.build_dataloaders()
-    trainer.train(train_loader, val_loader)
+    history = trainer.train(train_loader, val_loader)
+    return history
 
 
 def main():

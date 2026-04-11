@@ -44,6 +44,9 @@ class MLflowCallback:
                 mlflow.set_tracking_uri(self.tracking_uri)
 
             mlflow.set_experiment(self.experiment_name)
+            # End any lingering active run (e.g. from a previous training cell)
+            if mlflow.active_run() is not None:
+                mlflow.end_run()
             mlflow.start_run(run_name=self.run_name)
 
             # Log config as params (flatten nested dict)
