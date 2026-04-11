@@ -17,6 +17,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -224,6 +225,23 @@ class EmotionVITS(nn.Module):
             attn_mask = x_mask.transpose(1, 2) * y_mask   # (B, T_text, T_spec)
             attn = self._maximum_path(neg_cent, attn_mask) # (B, T_text, T_spec)
 
+        # --- Duration predictor loss from MAS alignment ---
+        dp = getattr(self.vits, "dp", None) or getattr(self.vits, "duration_predictor", None)
+        duration_loss = torch.tensor(0.0, device=x.device)
+        if dp is not None:
+            w = attn.sum(-1).unsqueeze(1)  # (B, 1, T_text) per-phone frames
+            try:
+                # Coqui StochasticDurationPredictor forward: (x, x_mask, w, g) -> NLL
+                dur_nll = dp(x_encoded, x_mask, w=w, g=None)
+                duration_loss = dur_nll / x_mask.sum()
+            except (TypeError, RuntimeError):
+                try:
+                    logw_hat = dp(x_encoded, x_mask, g=None)
+                    log_w_gt = torch.log(w.clamp(min=1e-6))
+                    duration_loss = F.l1_loss(logw_hat * x_mask, log_w_gt * x_mask)
+                except (TypeError, RuntimeError):
+                    pass  # DP interface incompatible, skip duration loss
+
         # Expand prior params from text-length to spec-length
         # (B, H, T_text) @ (B, T_text, T_spec) -> (B, H, T_spec)
         m_p = torch.bmm(m_p, attn)
@@ -246,6 +264,7 @@ class EmotionVITS(nn.Module):
             "m_q": m_q,
             "logs_q": logs_q,
             "x_encoded": x_encoded,
+            "duration_loss": duration_loss,
         }
 
         # --- Step 4: Prosody heads (System C) ---

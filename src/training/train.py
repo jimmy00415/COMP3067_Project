@@ -489,16 +489,16 @@ class Trainer:
                 prosody_targets=prosody_targets,
             )
 
-            # --- Reconstruction loss: L1 on mel spectrogram ---
-            o_hat = outputs["model_outputs"]  # Generated audio
-            # Compute mel of generated audio
-            o_hat_squeezed = o_hat.squeeze(1)  # (batch, samples)
-            # Trim/pad to match target length
-            min_len = min(o_hat_squeezed.shape[-1], audio.shape[-1])
-            mel_hat = _compute_mel_spectrogram(o_hat_squeezed[:, :min_len])
-            mel_target = _compute_mel_spectrogram(audio[:, :min_len])
-            # L1 on mel
-            mel_loss = F.l1_loss(mel_hat, mel_target)
+            # --- Reconstruction loss (monitoring only) ---
+            # Decoder & posterior encoder are frozen for all systems,
+            # so mel_loss is constant and provides no useful gradients.
+            o_hat = outputs["model_outputs"]
+            with torch.no_grad():
+                o_hat_squeezed = o_hat.squeeze(1)
+                min_len = min(o_hat_squeezed.shape[-1], audio.shape[-1])
+                mel_hat = _compute_mel_spectrogram(o_hat_squeezed[:, :min_len])
+                mel_target = _compute_mel_spectrogram(audio[:, :min_len])
+                mel_loss = F.l1_loss(mel_hat, mel_target)
 
             # --- KL divergence loss ---
             z_p = outputs["z_p"]
@@ -511,16 +511,20 @@ class Trainer:
             y_mask = torch.ones(z_p.shape[0], 1, z_p.shape[2], device=z_p.device)
             kl_loss = _kl_loss(z_p, logs_q, m_p, logs_p, y_mask)
 
+            # --- Duration predictor loss ---
+            duration_loss = outputs.get("duration_loss", torch.tensor(0.0, device=self.device))
+
             # --- Prosody loss (System C) ---
             prosody_loss = outputs.get("prosody_loss", torch.tensor(0.0, device=self.device))
 
-            # --- Total loss ---
-            total_loss = mel_loss + kl_loss + prosody_loss
+            # --- Total loss (mel excluded: frozen decoder) ---
+            total_loss = kl_loss + duration_loss + prosody_loss
 
         losses = {
             "loss_total": total_loss.item(),
             "loss_mel": mel_loss.item(),
             "loss_kl": kl_loss.item(),
+            "loss_dur": duration_loss.item() if isinstance(duration_loss, torch.Tensor) else duration_loss,
             "loss_prosody": prosody_loss.item() if isinstance(prosody_loss, torch.Tensor) else prosody_loss,
         }
 
@@ -605,13 +609,15 @@ class Trainer:
             y_mask = torch.ones(z_p.shape[0], 1, z_p.shape[2], device=z_p.device)
             kl_loss = _kl_loss(z_p, outputs["logs_q"], outputs["m_p"], outputs["logs_p"], y_mask)
 
+            duration_loss = outputs.get("duration_loss", torch.tensor(0.0, device=self.device))
             prosody_loss = outputs.get("prosody_loss", torch.tensor(0.0, device=self.device))
-            total_loss = mel_loss + kl_loss + prosody_loss
+            total_loss = kl_loss + duration_loss + prosody_loss
 
         return {
             "loss_total": total_loss.item(),
             "loss_mel": mel_loss.item(),
             "loss_kl": kl_loss.item(),
+            "loss_dur": duration_loss.item() if isinstance(duration_loss, torch.Tensor) else duration_loss,
             "loss_prosody": prosody_loss.item() if isinstance(prosody_loss, torch.Tensor) else prosody_loss,
         }
 
@@ -676,10 +682,8 @@ class Trainer:
             # Average epoch losses
             avg_train = {k: v / max(n_batches, 1) for k, v in epoch_losses.items()}
 
-            # Validation
-            avg_val = {}
-            if epoch % self.eval_every == 0 or epoch == 1:
-                avg_val = self.validate(val_loader)
+            # Validation (every epoch for reliable early stopping)
+            avg_val = self.validate(val_loader)
 
             # LR schedule
             if self.scheduler:
@@ -693,9 +697,12 @@ class Trainer:
 
             val_loss = avg_val.get("loss_total", avg_train.get("loss_total", 0))
             logger.info(
-                f"Epoch {epoch}/{self.max_epochs} �?"
+                f"Epoch {epoch}/{self.max_epochs} -- "
                 f"train_loss={avg_train.get('loss_total', 0):.4f}, "
                 f"val_loss={val_loss:.4f}, "
+                f"kl={avg_train.get('loss_kl', 0):.4f}, "
+                f"dur={avg_train.get('loss_dur', 0):.4f}, "
+                f"mel={avg_train.get('loss_mel', 0):.4f}, "
                 f"lr={self.optimizer.param_groups[0]['lr']:.2e}"
             )
 
