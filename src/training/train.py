@@ -295,6 +295,7 @@ class Trainer:
         self.max_samples = train_cfg.get("max_samples", None)
         self.save_every = train_cfg.get("save_every", 10)
         self.eval_every = train_cfg.get("eval_every", 5)
+        self.val_every = train_cfg.get("val_every", 1)  # validate every N epochs
 
         # Early stopping
         es_cfg = train_cfg.get("early_stopping", {})
@@ -684,8 +685,12 @@ class Trainer:
             # Average epoch losses
             avg_train = {k: v / max(n_batches, 1) for k, v in epoch_losses.items()}
 
-            # Validation (every epoch for reliable early stopping)
-            avg_val = self.validate(val_loader)
+            # Validation (every val_every epochs, plus always on last epoch)
+            run_val = (epoch % self.val_every == 0) or (epoch == self.max_epochs)
+            if run_val:
+                avg_val = self.validate(val_loader)
+            else:
+                avg_val = {}
 
             # LR schedule
             if self.scheduler:
@@ -693,7 +698,8 @@ class Trainer:
 
             # Logging
             log_metrics = {f"train/{k}": v for k, v in avg_train.items()}
-            log_metrics.update({f"val/{k}": v for k, v in avg_val.items()})
+            if avg_val:
+                log_metrics.update({f"val/{k}": v for k, v in avg_val.items()})
             log_metrics["lr"] = self.optimizer.param_groups[0]["lr"]
             mlflow_cb.log_metrics(log_metrics, step=epoch)
 
@@ -702,35 +708,46 @@ class Trainer:
             # Record history for post-training plots
             record = {"epoch": epoch, "lr": self.optimizer.param_groups[0]["lr"]}
             record.update({f"train_{k}": v for k, v in avg_train.items()})
-            record.update({f"val_{k}": v for k, v in avg_val.items()})
+            if avg_val:
+                record.update({f"val_{k}": v for k, v in avg_val.items()})
             history.append(record)
 
-            logger.info(
-                f"Epoch {epoch}/{self.max_epochs} -- "
-                f"train_loss={avg_train.get('loss_total', 0):.4f}, "
-                f"val_loss={val_loss:.4f}, "
-                f"kl={avg_train.get('loss_kl', 0):.4f}, "
-                f"dur={avg_train.get('loss_dur', 0):.4f}, "
-                f"mel={avg_train.get('loss_mel', 0):.4f}, "
-                f"lr={self.optimizer.param_groups[0]['lr']:.2e}"
-            )
-
-            # Checkpointing
-            is_best = val_loss < self.best_val_loss
-            if is_best:
-                self.best_val_loss = val_loss
-
-            if ckpt_cb.should_save(epoch) or is_best:
-                ckpt_cb.save(
-                    model=self.model, optimizer=self.optimizer,
-                    epoch=epoch, step=self.global_step,
-                    val_loss=val_loss, is_best=is_best,
+            if run_val:
+                logger.info(
+                    f"Epoch {epoch}/{self.max_epochs} -- "
+                    f"train_loss={avg_train.get('loss_total', 0):.4f}, "
+                    f"val_loss={val_loss:.4f}, "
+                    f"kl={avg_train.get('loss_kl', 0):.4f}, "
+                    f"dur={avg_train.get('loss_dur', 0):.4f}, "
+                    f"mel={avg_train.get('loss_mel', 0):.4f}, "
+                    f"lr={self.optimizer.param_groups[0]['lr']:.2e}"
+                )
+            else:
+                logger.info(
+                    f"Epoch {epoch}/{self.max_epochs} -- "
+                    f"train_loss={avg_train.get('loss_total', 0):.4f}, "
+                    f"kl={avg_train.get('loss_kl', 0):.4f}, "
+                    f"dur={avg_train.get('loss_dur', 0):.4f}, "
+                    f"lr={self.optimizer.param_groups[0]['lr']:.2e}"
                 )
 
-            # Early stopping
-            if es_cb.should_stop(val_loss):
-                logger.info(f"Early stopping at epoch {epoch}")
-                break
+            # Checkpointing & early stopping only when validation ran
+            if run_val:
+                is_best = val_loss < self.best_val_loss
+                if is_best:
+                    self.best_val_loss = val_loss
+
+                if ckpt_cb.should_save(epoch) or is_best:
+                    ckpt_cb.save(
+                        model=self.model, optimizer=self.optimizer,
+                        epoch=epoch, step=self.global_step,
+                        val_loss=val_loss, is_best=is_best,
+                    )
+
+                # Early stopping
+                if es_cb.should_stop(val_loss):
+                    logger.info(f"Early stopping at epoch {epoch}")
+                    break
 
         # Save final checkpoint
         ckpt_cb.save(
