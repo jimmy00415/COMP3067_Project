@@ -234,7 +234,8 @@ class EmotionVITS(nn.Module):
                 # Coqui StochasticDurationPredictor.forward(x, x_mask, dr, g, ...)
                 # dr = ground-truth durations, reverse=False (training mode)
                 dur_nll = dp(x_encoded, x_mask, dr=w, g=None, reverse=False)
-                duration_loss = dur_nll / x_mask.sum()
+                # SDP returns per-sample NLL (B,); reduce to scalar
+                duration_loss = dur_nll.sum() / x_mask.sum()
             except (TypeError, RuntimeError, AssertionError):
                 try:
                     logw_hat = dp(x_encoded, x_mask, g=None, reverse=True)
