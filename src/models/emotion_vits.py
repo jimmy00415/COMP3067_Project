@@ -13,6 +13,8 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+import math
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -200,8 +202,32 @@ class EmotionVITS(nn.Module):
         else:
             z_p = z
 
-        # Duration predictor (for duration loss)
-        # This is handled inside the standard VITS forward
+        # --- Monotonic Alignment Search (standard VITS training) ---
+        # Align text-length prior (m_p, logs_p) to spec-length posterior
+        # so all KL-loss tensors share the same time dimension.
+        with torch.no_grad():
+            s_p_sq_r = torch.exp(-2 * logs_p)  # 1/sigma_p^2, (B, H, T_text)
+            neg_cent1 = torch.sum(
+                -0.5 * math.log(2 * math.pi) - logs_p, dim=1
+            ).unsqueeze(-1)                                        # (B, T_text, 1)
+            neg_cent2 = torch.matmul(
+                -0.5 * s_p_sq_r.transpose(1, 2), z_p ** 2
+            )                                                      # (B, T_text, T_spec)
+            neg_cent3 = torch.matmul(
+                (s_p_sq_r * m_p).transpose(1, 2), z_p
+            )                                                      # (B, T_text, T_spec)
+            neg_cent4 = torch.sum(
+                -0.5 * (m_p ** 2) * s_p_sq_r, dim=1
+            ).unsqueeze(-1)                                        # (B, T_text, 1)
+            neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4
+
+            attn_mask = x_mask.transpose(1, 2) * y_mask   # (B, T_text, T_spec)
+            attn = self._maximum_path(neg_cent, attn_mask) # (B, T_text, T_spec)
+
+        # Expand prior params from text-length to spec-length
+        # (B, H, T_text) @ (B, T_text, T_spec) -> (B, H, T_spec)
+        m_p = torch.bmm(m_p, attn)
+        logs_p = torch.bmm(logs_p, attn)
 
         # Decoder
         if hasattr(self.vits, "dec"):
@@ -309,8 +335,10 @@ class EmotionVITS(nn.Module):
         attn_mask = torch.unsqueeze(x_mask, 2) * torch.unsqueeze(y_mask, -1)
         attn = self._generate_path(w_ceil, attn_mask)
 
-        m_p_expanded = torch.matmul(attn.squeeze(1), m_p.transpose(1, 2)).transpose(1, 2)
-        logs_p_expanded = torch.matmul(attn.squeeze(1), logs_p.transpose(1, 2)).transpose(1, 2)
+        # attn: (B, 1, T_text, T_spec) -> expand prior to spec-length
+        attn_sq = attn.squeeze(1)  # (B, T_text, T_spec)
+        m_p_expanded = torch.bmm(m_p, attn_sq)       # (B, H, T_spec)
+        logs_p_expanded = torch.bmm(logs_p, attn_sq)  # (B, H, T_spec)
 
         # Sample from prior
         z_p = m_p_expanded + torch.randn_like(m_p_expanded) * torch.exp(logs_p_expanded) * noise_scale
@@ -337,6 +365,53 @@ class EmotionVITS(nn.Module):
             max_length = length.max()
         x = torch.arange(max_length, dtype=length.dtype, device=length.device)
         return x.unsqueeze(0) < length.unsqueeze(1)
+
+    @staticmethod
+    def _maximum_path(value, mask):
+        """Monotonic Alignment Search (MAS) via Viterbi DP.
+
+        Finds the maximum-sum monotonic path through the log-likelihood
+        matrix — standard VITS training alignment.
+
+        Args:
+            value: (B, T_text, T_spec) log-likelihood scores.
+            mask:  (B, T_text, T_spec) valid-position mask (1=valid).
+
+        Returns:
+            path: (B, T_text, T_spec) hard 0/1 alignment.
+        """
+        device = value.device
+        dtype = value.dtype
+        value_np = value.detach().cpu().numpy().astype(np.float64)
+        mask_np = mask.detach().cpu().numpy().astype(np.bool_)
+        B, T_x, T_y = value_np.shape
+        path = np.zeros_like(value_np, dtype=np.float32)
+
+        for b in range(B):
+            t_x = int(mask_np[b, :, 0].sum())
+            t_y = int(mask_np[b, 0, :].sum())
+            if t_x < 1 or t_y < 1:
+                continue
+
+            v = np.full((t_x, t_y), -1e9, dtype=np.float64)
+            v[0, 0] = value_np[b, 0, 0]
+
+            # Forward DP
+            for j in range(1, t_y):
+                for i in range(min(t_x, j + 1)):
+                    prev = v[i, j - 1]
+                    if i > 0:
+                        prev = max(prev, v[i - 1, j - 1])
+                    v[i, j] = value_np[b, i, j] + prev
+
+            # Backtrace
+            i = t_x - 1
+            for j in range(t_y - 1, -1, -1):
+                path[b, i, j] = 1.0
+                if j > 0 and i > 0 and v[i - 1, j - 1] > v[i, j - 1]:
+                    i -= 1
+
+        return torch.from_numpy(path).to(device=device, dtype=dtype)
 
     @staticmethod
     def _generate_path(duration, mask):
