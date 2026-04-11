@@ -72,7 +72,7 @@ def _compute_mel_spectrogram(
     )
     magnitudes = stft.abs()  # (batch, n_fft//2+1, frames)
 
-    # Mel filterbank — cached per (device, sr, n_fft, n_mels, fmin, fmax)
+    # Mel filterbank �?cached per (device, sr, n_fft, n_mels, fmin, fmax)
     cache_key = (str(audio.device), sample_rate, n_fft, n_mels, fmin, fmax)
     if cache_key not in _MEL_BASIS_CACHE:
         import librosa
@@ -95,7 +95,7 @@ def _compute_linear_spectrogram(
 ) -> torch.Tensor:
     """Compute linear spectrogram (magnitude) from waveform.
 
-    Returns shape ``(batch, n_fft//2+1, frames)`` — 513 bins for n_fft=1024.
+    Returns shape ``(batch, n_fft//2+1, frames)`` �?513 bins for n_fft=1024.
     This is what the VITS posterior encoder expects as input.
     """
     window = torch.hann_window(win_length, device=audio.device)
@@ -498,442 +498,265 @@ class Trainer:
             mel_hat = _compute_mel_spectrogram(o_hat_squeezed[:, :min_len])
             mel_target = _compute_mel_spectrogram(audio[:, :min_len])
             # L1 on mel
-            mel_min_frames = min(mel_hat.shape[-1], mel_target.shape[-1])
-            recon_loss = F.l1_loss(
-                mel_hat[:, :, :mel_min_frames],
-                mel_target[:, :, :mel_min_frames],
-            )
+            mel_loss = F.l1_loss(mel_hat, mel_target)
 
-            # --- KL loss ---
-            kl_loss = torch.tensor(0.0, device=self.device)
-            if all(k in outputs for k in ("z_p", "m_p", "logs_p", "m_q", "logs_q")):
-                z_p = outputs["z_p"]
-                m_p = outputs["m_p"]
-                logs_p = outputs["logs_p"]
-                logs_q = outputs["logs_q"]
-                # Create mask from spec_lengths
-                max_spec_len = z_p.shape[-1]
-                z_mask = torch.arange(max_spec_len, device=self.device).unsqueeze(0) < spec_lengths.unsqueeze(1)
-                z_mask = z_mask.unsqueeze(1).float()  # (batch, 1, time)
-                kl_loss = _kl_loss(z_p, logs_q, m_p, logs_p, z_mask)
+            # --- KL divergence loss ---
+            z_p = outputs["z_p"]
+            m_p = outputs["m_p"]
+            logs_p = outputs["logs_p"]
+            m_q = outputs["m_q"]
+            logs_q = outputs["logs_q"]
 
-            # --- Prosody auxiliary loss (System C) ---
+            # Build mask for KL loss
+            y_mask = torch.ones(z_p.shape[0], 1, z_p.shape[2], device=z_p.device)
+            kl_loss = _kl_loss(z_p, logs_q, m_p, logs_p, y_mask)
+
+            # --- Prosody loss (System C) ---
             prosody_loss = outputs.get("prosody_loss", torch.tensor(0.0, device=self.device))
 
             # --- Total loss ---
-            kl_weight = self.cfg.get("training", {}).get("kl_weight", 1.0)
-            loss = recon_loss + kl_weight * kl_loss + prosody_loss
+            total_loss = mel_loss + kl_loss + prosody_loss
 
         losses = {
-            "total_loss": loss.item(),
-            "recon_loss": recon_loss.item(),
-            "kl_loss": kl_loss.item(),
+            "loss_total": total_loss.item(),
+            "loss_mel": mel_loss.item(),
+            "loss_kl": kl_loss.item(),
+            "loss_prosody": prosody_loss.item() if isinstance(prosody_loss, torch.Tensor) else prosody_loss,
         }
-        if self.system.upper() == "C":
-            losses["prosody_loss"] = prosody_loss.item()
 
         # Backward
         if self.scaler:
-            self.scaler.scale(loss).backward()
-            if (self.global_step + 1) % self.grad_accum_steps == 0:
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                self.optimizer.zero_grad()
+            self.scaler.scale(total_loss / self.grad_accum_steps).backward()
         else:
-            loss.backward()
-            if (self.global_step + 1) % self.grad_accum_steps == 0:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                self.optimizer.step()
-                self.optimizer.zero_grad()
+            (total_loss / self.grad_accum_steps).backward()
 
-        self.global_step += 1
         return losses
 
     @torch.no_grad()
     def validate(self, val_loader: DataLoader) -> dict:
         """Run validation loop.
 
-        Computes the same losses as ``train_step`` but without backprop.
+        Args:
+            val_loader: Validation DataLoader.
 
         Returns:
-            Dict of averaged validation metrics.
+            Dict of average validation losses.
         """
         self.model.eval()
-        total_loss = 0.0
-        total_recon = 0.0
-        total_kl = 0.0
-        total_prosody = 0.0
+        total_losses = {}
         n_batches = 0
 
         for batch in val_loader:
-            audio = batch["audio"].to(self.device)
-            audio_lengths = batch["audio_lengths"].to(self.device)
-            emotion_ids = batch["emotion_ids"].to(self.device) if self.system.upper() != "A" else None
-
-            prosody_targets = None
-            if self.system.upper() == "C" and "f0_stats" in batch:
-                prosody_targets = {
-                    "f0_stats": batch["f0_stats"].to(self.device),
-                    "energy_stats": batch["energy_stats"].to(self.device),
-                }
-
-            texts = batch["texts"]
-
-            # Tokenize
-            try:
-                tokenizer = self.model.vits.tokenizer
-                text_tokens = [torch.LongTensor(tokenizer.text_to_ids(t)) for t in texts]
-            except (AttributeError, Exception):
-                text_tokens = [torch.LongTensor([ord(c) % 256 for c in t]) for t in texts]
-
-            max_text_len = max(len(t) for t in text_tokens)
-            x = torch.zeros(len(text_tokens), max_text_len, dtype=torch.long, device=self.device)
-            x_lengths = torch.zeros(len(text_tokens), dtype=torch.long, device=self.device)
-            for i, t in enumerate(text_tokens):
-                x[i, :len(t)] = t.to(self.device)
-                x_lengths[i] = len(t)
-
-            linear_spec = _compute_linear_spectrogram(audio).to(self.device)
-            spec_lengths = (audio_lengths / 256).long().clamp(min=1)
-
-            with torch.amp.autocast("cuda", enabled=self.fp16):
-                outputs = self.model(
-                    x=x, x_lengths=x_lengths,
-                    y=linear_spec, y_lengths=spec_lengths,
-                    emotion_ids=emotion_ids,
-                    prosody_targets=prosody_targets,
-                )
-
-                # Reconstruction loss
-                o_hat = outputs["model_outputs"].squeeze(1)
-                min_len = min(o_hat.shape[-1], audio.shape[-1])
-                mel_hat = _compute_mel_spectrogram(o_hat[:, :min_len])
-                mel_target = _compute_mel_spectrogram(audio[:, :min_len])
-                mel_min_frames = min(mel_hat.shape[-1], mel_target.shape[-1])
-                recon_loss = F.l1_loss(
-                    mel_hat[:, :, :mel_min_frames],
-                    mel_target[:, :, :mel_min_frames],
-                )
-
-                # KL loss
-                kl_loss = torch.tensor(0.0, device=self.device)
-                if all(k in outputs for k in ("z_p", "m_p", "logs_p", "m_q", "logs_q")):
-                    z_p = outputs["z_p"]
-                    max_spec_len = z_p.shape[-1]
-                    z_mask = (torch.arange(max_spec_len, device=self.device).unsqueeze(0) < spec_lengths.unsqueeze(1))
-                    z_mask = z_mask.unsqueeze(1).float()
-                    kl_loss = _kl_loss(z_p, outputs["logs_q"], outputs["m_p"], outputs["logs_p"], z_mask)
-
-                prosody_loss = outputs.get("prosody_loss", torch.tensor(0.0, device=self.device))
-
-                kl_weight = self.cfg.get("training", {}).get("kl_weight", 1.0)
-                loss = recon_loss + kl_weight * kl_loss + prosody_loss
-
-            total_loss += loss.item()
-            total_recon += recon_loss.item()
-            total_kl += kl_loss.item()
-            total_prosody += prosody_loss.item()
+            losses = self._val_step(batch)
+            for k, v in losses.items():
+                total_losses[k] = total_losses.get(k, 0.0) + v
             n_batches += 1
 
-        denom = max(n_batches, 1)
-        metrics = {
-            "val_loss": total_loss / denom,
-            "val_recon_loss": total_recon / denom,
-            "val_kl_loss": total_kl / denom,
-        }
-        if self.system.upper() == "C":
-            metrics["val_prosody_loss"] = total_prosody / denom
-        return metrics
+        avg_losses = {k: v / max(n_batches, 1) for k, v in total_losses.items()}
+        self.model.train()
+        return avg_losses
 
-    def save_checkpoint(self, epoch: int, is_best: bool = False):
-        """Save model checkpoint (locally and optionally to Drive)."""
-        state = {
-            "epoch": epoch,
-            "global_step": self.global_step,
-            "model_state_dict": self.model.state_dict(),
-            "vits_state_dict": self.model.vits.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-            "best_val_loss": self.best_val_loss,
-            "system": self.system,
-            "config": self.cfg,
-        }
+    @torch.no_grad()
+    def _val_step(self, batch: dict) -> dict:
+        """Single validation step (no gradient)."""
+        audio = batch["audio"].to(self.device)
+        audio_lengths = batch["audio_lengths"].to(self.device)
+        emotion_ids = batch["emotion_ids"].to(self.device) if self.system.upper() != "A" else None
 
-        # Save emotion embedding separately for easy transfer
-        if self.model.emotion_embedding is not None:
-            state["emotion_embedding_state"] = self.model.emotion_embedding.state_dict()
+        prosody_targets = None
+        if self.system.upper() == "C" and "f0_stats" in batch:
+            prosody_targets = {
+                "f0_stats": batch["f0_stats"].to(self.device),
+                "energy_stats": batch["energy_stats"].to(self.device),
+            }
 
-        # Save prosody heads separately
-        if self.model.prosody_heads is not None:
-            state["prosody_heads_state"] = self.model.prosody_heads.state_dict()
+        texts = batch["texts"]
 
-        # Regular checkpoint
-        path = self.checkpoint_dir / f"epoch_{epoch:04d}.pth"
-        torch.save(state, path)
-        logger.info(f"Saved checkpoint: {path}")
-
-        # Best checkpoint
-        if is_best:
-            best_path = self.checkpoint_dir / "best.pth"
-            torch.save(state, best_path)
-            logger.info(f"Saved best checkpoint: {best_path}")
-
-        # Persist best checkpoint to Drive (Colab crash resilience)
-        if is_best:
-            self._backup_to_drive(best_path)
-
-    def _backup_to_drive(self, local_path: Path):
-        """Copy checkpoint to Google Drive if drive_checkpoint_dir is set."""
-        drive_dir = self.cfg.get("training", {}).get("drive_checkpoint_dir")
-        if not drive_dir:
-            return
-        drive_dir = Path(drive_dir)
+        # Tokenize
         try:
-            drive_dir.mkdir(parents=True, exist_ok=True)
-            dst = drive_dir / local_path.name
-            shutil.copy2(str(local_path), str(dst))
-            logger.info(f"Backed up to Drive: {dst}")
-        except Exception as e:
-            logger.warning(f"Drive backup failed (non-critical): {e}")
+            tokenizer = self.model.vits.tokenizer
+            text_tokens = [torch.LongTensor(tokenizer.text_to_ids(t)) for t in texts]
+        except (AttributeError, Exception):
+            text_tokens = [torch.LongTensor([ord(c) % 256 for c in t]) for t in texts]
 
-    def train(self):
-        """Full training loop."""
-        logger.info(f"Starting training for System {self.system}")
-        logger.info(f"Device: {self.device}, FP16: {self.fp16}")
-        logger.info(f"Max epochs: {self.max_epochs}, Batch size: {self.batch_size}")
-        logger.info(f"LR: {self.lr}, Patience: {self.patience}")
+        max_text_len = max(len(t) for t in text_tokens)
+        x = torch.zeros(len(text_tokens), max_text_len, dtype=torch.long, device=self.device)
+        x_lengths = torch.zeros(len(text_tokens), dtype=torch.long, device=self.device)
+        for i, t in enumerate(text_tokens):
+            x[i, :len(t)] = t.to(self.device)
+            x_lengths[i] = len(t)
 
-        # Build model and data
-        self.build_model()
-        train_loader, val_loader = self.build_dataloaders()
+        linear_spec = _compute_linear_spectrogram(audio).to(self.device)
+        spec_lengths = (audio_lengths / 256).long().clamp(min=1)
 
-        # Optional: MLflow tracking
-        mlflow_enabled = False
-        try:
-            import mlflow
-            experiment_name = self.cfg.get("mlflow", {}).get("experiment", f"emotive-tts-system-{self.system}")
-            mlflow.set_experiment(experiment_name)
-            mlflow.start_run(run_name=f"system_{self.system}_{int(time.time())}")
-            mlflow.log_params({
-                "system": self.system,
-                "lr": self.lr,
-                "batch_size": self.batch_size,
-                "max_epochs": self.max_epochs,
-                "fp16": self.fp16,
-            })
-            mlflow_enabled = True
-            logger.info("MLflow tracking enabled")
-        except Exception as e:
-            logger.warning(f"MLflow not available: {e}. Training without tracking.")
+        with torch.amp.autocast("cuda", enabled=self.fp16):
+            outputs = self.model(
+                x=x, x_lengths=x_lengths, y=linear_spec, y_lengths=spec_lengths,
+                emotion_ids=emotion_ids, prosody_targets=prosody_targets,
+            )
+            o_hat = outputs["model_outputs"]
+            o_hat_squeezed = o_hat.squeeze(1)
+            min_len = min(o_hat_squeezed.shape[-1], audio.shape[-1])
+            mel_hat = _compute_mel_spectrogram(o_hat_squeezed[:, :min_len])
+            mel_target = _compute_mel_spectrogram(audio[:, :min_len])
+            mel_loss = F.l1_loss(mel_hat, mel_target)
 
-        # Training loop
+            z_p = outputs["z_p"]
+            y_mask = torch.ones(z_p.shape[0], 1, z_p.shape[2], device=z_p.device)
+            kl_loss = _kl_loss(z_p, outputs["logs_q"], outputs["m_p"], outputs["logs_p"], y_mask)
+
+            prosody_loss = outputs.get("prosody_loss", torch.tensor(0.0, device=self.device))
+            total_loss = mel_loss + kl_loss + prosody_loss
+
+        return {
+            "loss_total": total_loss.item(),
+            "loss_mel": mel_loss.item(),
+            "loss_kl": kl_loss.item(),
+            "loss_prosody": prosody_loss.item() if isinstance(prosody_loss, torch.Tensor) else prosody_loss,
+        }
+
+    def train(self, train_loader: DataLoader, val_loader: DataLoader):
+        """Full training loop with validation, checkpointing, and early stopping.
+
+        Args:
+            train_loader: Training DataLoader.
+            val_loader: Validation DataLoader.
+        """
+        from src.training.callbacks import (
+            CheckpointCallback,
+            EarlyStoppingCallback,
+            MLflowCallback,
+        )
+
+        ckpt_cb = CheckpointCallback(
+            checkpoint_dir=str(self.checkpoint_dir),
+            save_every=self.save_every,
+            keep_last=3,
+        )
+        es_cb = EarlyStoppingCallback(
+            patience=self.patience,
+            min_delta=self.min_delta,
+        )
+        mlflow_cb = MLflowCallback(
+            experiment_name="emotive-tts",
+            run_name=f"system_{self.system.lower()}",
+        )
+        mlflow_cb.setup(self.cfg)
+
+        logger.info(f"Starting training: System {self.system}, {self.max_epochs} epochs, "
+                     f"batch_size={self.batch_size}, lr={self.lr}")
+
         for epoch in range(1, self.max_epochs + 1):
-            epoch_start = time.time()
-            epoch_losses = []
+            self.model.train()
+            epoch_losses = {}
+            n_batches = 0
 
             for batch_idx, batch in enumerate(train_loader):
                 losses = self.train_step(batch)
-                epoch_losses.append(losses["total_loss"])
+                for k, v in losses.items():
+                    epoch_losses[k] = epoch_losses.get(k, 0.0) + v
+                n_batches += 1
+                self.global_step += 1
 
-                if batch_idx % 50 == 0:
-                    parts = [f"Loss: {losses['total_loss']:.4f}"]
-                    if "recon_loss" in losses:
-                        parts.append(f"Recon: {losses['recon_loss']:.4f}")
-                    if "kl_loss" in losses:
-                        parts.append(f"KL: {losses['kl_loss']:.4f}")
-                    if "prosody_loss" in losses:
-                        parts.append(f"Pros: {losses['prosody_loss']:.4f}")
-                    logger.info(
-                        f"Epoch {epoch}/{self.max_epochs}, "
-                        f"Batch {batch_idx}/{len(train_loader)}, "
-                        + ", ".join(parts)
-                    )
+                # Gradient step (with accumulation)
+                if (batch_idx + 1) % self.grad_accum_steps == 0:
+                    if self.cfg.get("training", {}).get("gradient_clip_val"):
+                        clip_val = self.cfg["training"]["gradient_clip_val"]
+                        torch.nn.utils.clip_grad_norm_(
+                            [p for p in self.model.parameters() if p.requires_grad],
+                            clip_val,
+                        )
+                    if self.scaler:
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        self.optimizer.step()
+                    self.optimizer.zero_grad()
 
-            # Epoch stats
-            avg_train_loss = np.mean(epoch_losses) if epoch_losses else 0.0
-            epoch_time = time.time() - epoch_start
+            # Average epoch losses
+            avg_train = {k: v / max(n_batches, 1) for k, v in epoch_losses.items()}
 
             # Validation
-            if epoch % self.eval_every == 0 or epoch == self.max_epochs:
-                val_metrics = self.validate(val_loader)
-                val_loss = val_metrics["val_loss"]
+            avg_val = {}
+            if epoch % self.eval_every == 0 or epoch == 1:
+                avg_val = self.validate(val_loader)
 
-                logger.info(
-                    f"Epoch {epoch}: train_loss={avg_train_loss:.4f}, "
-                    f"val_loss={val_loss:.4f}, time={epoch_time:.1f}s"
+            # LR schedule
+            if self.scheduler:
+                self.scheduler.step()
+
+            # Logging
+            log_metrics = {f"train/{k}": v for k, v in avg_train.items()}
+            log_metrics.update({f"val/{k}": v for k, v in avg_val.items()})
+            log_metrics["lr"] = self.optimizer.param_groups[0]["lr"]
+            mlflow_cb.log_metrics(log_metrics, step=epoch)
+
+            val_loss = avg_val.get("loss_total", avg_train.get("loss_total", 0))
+            logger.info(
+                f"Epoch {epoch}/{self.max_epochs} �?"
+                f"train_loss={avg_train.get('loss_total', 0):.4f}, "
+                f"val_loss={val_loss:.4f}, "
+                f"lr={self.optimizer.param_groups[0]['lr']:.2e}"
+            )
+
+            # Checkpointing
+            is_best = val_loss < self.best_val_loss
+            if is_best:
+                self.best_val_loss = val_loss
+
+            if ckpt_cb.should_save(epoch) or is_best:
+                ckpt_cb.save(
+                    model=self.model, optimizer=self.optimizer,
+                    epoch=epoch, step=self.global_step,
+                    val_loss=val_loss, is_best=is_best,
                 )
 
-                # MLflow logging
-                if mlflow_enabled:
-                    log_dict = {
-                        "train_loss": avg_train_loss,
-                        "val_loss": val_loss,
-                        "epoch_time": epoch_time,
-                        "lr": self.optimizer.param_groups[0]["lr"],
-                    }
-                    # Add detailed val metrics
-                    for k, v in val_metrics.items():
-                        if k != "val_loss":
-                            log_dict[k] = v
-                    mlflow.log_metrics(log_dict, step=epoch)
-
-                # Early stopping check
-                if val_loss < self.best_val_loss - self.min_delta:
-                    self.best_val_loss = val_loss
-                    self.patience_counter = 0
-                    self.save_checkpoint(epoch, is_best=True)
-                else:
-                    self.patience_counter += 1
-                    if self.patience_counter >= self.patience:
-                        logger.info(f"Early stopping at epoch {epoch}")
-                        break
-
-            # Regular checkpoint
-            if epoch % self.save_every == 0:
-                self.save_checkpoint(epoch, is_best=False)
-
-            # LR decay
-            self.scheduler.step()
-
-            # Periodic GPU housekeeping (prevents fragmentation on Colab T4)
-            if self.device.type == "cuda" and epoch % 5 == 0:
-                gc.collect()
-                torch.cuda.empty_cache()
+            # Early stopping
+            if es_cb.should_stop(val_loss):
+                logger.info(f"Early stopping at epoch {epoch}")
+                break
 
         # Save final checkpoint
-        self.save_checkpoint(epoch, is_best=False)
+        ckpt_cb.save(
+            model=self.model, optimizer=self.optimizer,
+            epoch=epoch, step=self.global_step,
+            val_loss=val_loss, is_best=False,
+        )
+        mlflow_cb.end()
+        logger.info("Training complete")
 
-        if mlflow_enabled:
-            mlflow.end_run()
 
-        logger.info(f"Training complete. Best val loss: {self.best_val_loss:.4f}")
-        return {"best_val_loss": self.best_val_loss, "epochs_trained": epoch}
-
-
-def train_with_coqui(cfg: dict) -> None:
-    """Train using Coqui's native Trainer (recommended approach).
-
-    This leverages Coqui TTS's built-in training infrastructure,
-    which handles spectrogram computation, discriminator training,
-    and all the VITS-specific details properly.
-
-    The key modifications are applied via config overrides and
-    model surgery (adding emotion embedding + prosody heads).
+def train(cfg: dict):
+    """High-level entry point for training.
 
     Args:
-        cfg: Training configuration dict.
+        cfg: Full config dict (from train_a/b/c.yaml).
     """
-    from TTS.tts.configs.vits_config import VitsConfig
-    from TTS.tts.models.vits import Vits
-    from TTS.trainer import Trainer as CoquiTrainer, TrainerArgs
+    # Seed
+    seed = cfg.get("training", {}).get("seed", 42)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
-    system = cfg.get("system", "A")
-    data_cfg = cfg.get("data", {})
-    train_cfg = cfg.get("training", {})
-
-    # Build Coqui VITS config
-    vits_config = VitsConfig(
-        run_name=f"emotive_tts_system_{system}",
-        output_path=str(cfg.get("checkpoint_dir", f"checkpoints/system_{system.lower()}")),
-        batch_size=train_cfg.get("batch_size", 16),
-        eval_batch_size=train_cfg.get("batch_size", 16),
-        num_loader_workers=2,
-        epochs=train_cfg.get("max_epochs", 100),
-        lr_gen=train_cfg.get("optimizer", {}).get("lr", 1e-4),
-        lr_disc=train_cfg.get("optimizer", {}).get("lr", 1e-4),
-        mixed_precision=train_cfg.get("fp16", True),
-    )
-
-    # Data paths
-    vits_config.datasets = [{
-        "name": "emovdb",
-        "path": data_cfg.get("processed_dir", "data/processed/train"),
-        "meta_file_train": os.path.join(data_cfg.get("manifests_dir", "data/manifests"), "train.csv"),
-        "meta_file_val": os.path.join(data_cfg.get("manifests_dir", "data/manifests"), "val.csv"),
-    }]
-
-    # Initialize model
-    model = Vits.init_from_config(vits_config)
-
-    # Load pretrained weights
-    init_from = cfg.get("training", {}).get("init_from", cfg.get("init_from"))
-    if init_from == "pretrained":
-        logger.info("Initializing from pretrained LJSpeech VITS")
-        # Download and load pretrained weights
-        from TTS.api import TTS
-        pretrained = TTS(model_name="tts_models/en/ljspeech/vits", gpu=False)
-        pretrained_state = pretrained.synthesizer.tts_model.state_dict()
-        model.load_state_dict(pretrained_state, strict=False)
-    elif init_from and Path(init_from).exists():
-        logger.info(f"Initializing from checkpoint: {init_from}")
-        state = torch.load(init_from, map_location="cpu", weights_only=False)
-        if "model_state_dict" in state:
-            model.load_state_dict(state["model_state_dict"], strict=False)
-        elif "vits_state_dict" in state:
-            model.load_state_dict(state["vits_state_dict"], strict=False)
-
-    # Apply freeze strategy
-    freeze_cfg = cfg.get("training", {}).get("freeze", {})
-    modules_to_freeze = freeze_cfg.get("modules", [])
-    modules_to_unfreeze = freeze_cfg.get("unfreeze", [])
-
-    for name, param in model.named_parameters():
-        should_freeze = any(m in name for m in modules_to_freeze)
-        should_unfreeze = any(m in name for m in modules_to_unfreeze)
-        param.requires_grad = not should_freeze or should_unfreeze
-
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total = sum(p.numel() for p in model.parameters())
-    logger.info(f"Trainable: {trainable:,} / {total:,} ({100*trainable/total:.1f}%)")
-
-    # Launch Coqui trainer
-    trainer = CoquiTrainer(
-        TrainerArgs(),
-        vits_config,
-        output_path=vits_config.output_path,
-        model=model,
-    )
-    trainer.fit()
-
-
-def train(cfg: dict) -> dict:
-    """Main entry point for training.
-
-    Args:
-        cfg: Configuration dict.
-
-    Returns:
-        Training results dict.
-    """
-    use_coqui_trainer = cfg.get("use_coqui_trainer", False)
-
-    if use_coqui_trainer:
-        train_with_coqui(cfg)
-        return {"method": "coqui_trainer"}
-    else:
-        trainer = Trainer(cfg)
-        return trainer.train()
+    trainer = Trainer(cfg)
+    trainer.build_model()
+    train_loader, val_loader = trainer.build_dataloaders()
+    trainer.train(train_loader, val_loader)
 
 
 def main():
     """CLI entry point."""
-    import yaml
     import argparse
+    import yaml
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    parser = argparse.ArgumentParser(description="Train EmotionVITS")
-    parser.add_argument("--config", type=str, required=True, help="Training config YAML")
-    parser.add_argument("--use-coqui-trainer", action="store_true",
-                        help="Use Coqui's native Trainer instead of custom loop")
+    parser = argparse.ArgumentParser(description="Train EmotionVITS systems")
+    parser.add_argument("--config", type=str, required=True,
+                        help="Path to training config YAML (e.g., configs/train_b.yaml)")
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f)
-
-    if args.use_coqui_trainer:
-        cfg["use_coqui_trainer"] = True
 
     train(cfg)
 

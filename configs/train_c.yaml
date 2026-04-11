@@ -56,7 +56,7 @@ training:
 
   max_epochs: 100
   batch_size: 16
-  gradient_clip_val: 1.0
+  gradient_clip_val: 5.0
   early_stopping:
     monitor: val/loss_total
     patience: 10

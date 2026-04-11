@@ -118,14 +118,14 @@ def synthesize(
         # Apply intensity scaling to emotion embedding temporarily
         if intensity != 1.0 and model.emotion_embedding is not None:
             original_weight = model.emotion_embedding.embedding.weight.data.clone()
-            model.emotion_embedding.embedding.weight.data *= intensity
+            model.emotion_embedding.embedding.weight.data = original_weight * intensity
 
         with torch.no_grad():
             wav_tensor = model.infer(x, emotion_ids=eid)
 
-        # Restore original weights
+        # Restore original weights (always, to avoid accumulation)
         if intensity != 1.0 and model.emotion_embedding is not None:
-            model.emotion_embedding.embedding.weight.data = original_weight
+            model.emotion_embedding.embedding.weight.data.copy_(original_weight)
 
         wav = wav_tensor.squeeze().cpu().numpy()
         return sr, wav

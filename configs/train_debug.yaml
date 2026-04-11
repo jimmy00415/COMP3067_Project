@@ -1,7 +1,7 @@
 # Debug training config — small run for code validation
 # Use before GPU training to catch bugs fast
 
-system: debug
+system: B
 description: "Debug config — 50 samples, 5 epochs, CPU-safe"
 
 model:
@@ -41,7 +41,11 @@ training:
   max_epochs: 5
   batch_size: 4
   max_samples: 50  # Limit dataset size
-  gradient_clip_val: 1.0
+  gradient_clip_val: 5.0
+  eval_every: 1
+  save_every: 5
+  num_workers: 0
+  use_cuda: false
   
   checkpoint:
     save_top_k: 1
