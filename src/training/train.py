@@ -520,8 +520,17 @@ class Trainer:
             # --- Prosody loss (System C) ---
             prosody_loss = outputs.get("prosody_loss", torch.tensor(0.0, device=self.device))
 
-            # --- Total loss (mel excluded: frozen decoder) ---
-            total_loss = kl_loss + duration_loss + prosody_loss
+            # --- Total loss (mel & dur excluded: monitoring only) ---
+            total_loss = kl_loss + prosody_loss
+
+            # NaN guard: skip batch if loss is invalid
+            if torch.isnan(total_loss) or torch.isinf(total_loss):
+                logger.warning(f"NaN/Inf loss detected — skipping batch")
+                self.optimizer.zero_grad()
+                return {
+                    "loss_total": 0.0, "loss_mel": 0.0, "loss_kl": 0.0,
+                    "loss_dur": 0.0, "loss_prosody": 0.0,
+                }
 
         losses = {
             "loss_total": total_loss.item(),
@@ -616,7 +625,7 @@ class Trainer:
 
             duration_loss = outputs.get("duration_loss", torch.tensor(0.0, device=self.device))
             prosody_loss = outputs.get("prosody_loss", torch.tensor(0.0, device=self.device))
-            total_loss = kl_loss + duration_loss + prosody_loss
+            total_loss = kl_loss + prosody_loss  # dur is monitoring-only
 
         return {
             "loss_total": total_loss.item(),

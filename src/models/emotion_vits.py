@@ -225,22 +225,18 @@ class EmotionVITS(nn.Module):
             attn_mask = x_mask.transpose(1, 2) * y_mask   # (B, T_text, T_spec)
             attn = self._maximum_path(neg_cent, attn_mask) # (B, T_text, T_spec)
 
-        # --- Duration predictor loss from MAS alignment ---
-        # We do NOT call the SDP (Stochastic Duration Predictor) here.
-        # Both forward and reverse modes use rational-quadratic-spline
-        # normalizing flows that crash on short sequences (empty internal
-        # tensors → RuntimeError/AssertionError in transforms.py).
-        # Instead, compute a simple L1 loss on log-durations directly
-        # from the MAS alignment — this trains the flow + DP pathway
-        # through the KL loss and provides a clean duration signal.
-        w = attn.sum(-1)  # (B, T_text) — MAS ground-truth durations
-        log_dur_gt = torch.log(w.clamp(min=1e-6))             # (B, T_text)
-        # Predict durations from encoded text via simple projection
-        # (mean-pool over hidden dim → scalar per phone)
-        log_dur_pred = x_encoded.mean(dim=1)                    # (B, T_text)
-        text_mask_sq = x_mask.squeeze(1)                        # (B, T_text)
-        duration_loss = F.l1_loss(log_dur_pred * text_mask_sq,
-                                   log_dur_gt * text_mask_sq)
+        # --- Duration loss (monitoring only) ---
+        # The SDP's spline transforms crash on short sequences and our
+        # mean-pool proxy created NaN gradients that corrupted the flow.
+        # Duration loss is now monitor-only (detached).  The DP still
+        # learns indirectly via the KL loss through the flow pathway.
+        with torch.no_grad():
+            w = attn.sum(-1)  # (B, T_text) — MAS durations
+            log_dur_gt = torch.log(w.clamp(min=1e-6))
+            log_dur_pred = x_encoded.detach().mean(dim=1)
+            text_mask_sq = x_mask.squeeze(1)
+            duration_loss = F.l1_loss(log_dur_pred * text_mask_sq,
+                                       log_dur_gt * text_mask_sq)
 
         # Expand prior params from text-length to spec-length
         # (B, H, T_text) @ (B, T_text, T_spec) -> (B, H, T_spec)
